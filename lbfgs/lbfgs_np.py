@@ -115,7 +115,7 @@ def zoom(
                 alpha_lo = alpha_j
                 phi_lo = phi_j
                 phip_lo = phip_j
-        
+
     # also handles case when `is_done == False`
     alpha_star, phi_star, grad_f_star = alpha_j, phi_j, grad_f_j
     return alpha_star, phi_star, grad_f_star
@@ -123,7 +123,7 @@ def zoom(
 
 def gamma_scale(s0: np.ndarray, y0: np.ndarray) -> floating:
     r"""Scaling factor for L-BFGS matrices.
-    
+
     Notes
     -----
     Cf. equation (7.20) from [NW06].
@@ -133,6 +133,7 @@ def gamma_scale(s0: np.ndarray, y0: np.ndarray) -> floating:
     Returns: $\gamma_k$.
     """
     assert len(s0.shape) == 1 and len(y0.shape) == 1
+    assert s0.shape == y0.shape
     return np.dot(s0, y0) / np.dot(y0, y0)
 
 
@@ -144,7 +145,7 @@ def hess_vec_product(
     m: int,
 ) -> np.ndarray:
     r"""Efficient L-BFGS matrix vector product.
-    
+
     Notes
     -----
     Cf. Algorithm 7.4 from [NW06].
@@ -155,24 +156,24 @@ def hess_vec_product(
     * rho[i] -> $\rho_{k - m} 1 / (y_{k - m}^T s_k)$
     * m -> $k$ (and the $m = k$, so really BFGS)
     * r -> $r$
-    Return 
+    Return
     """
     assert len(s.shape) == 2 and s.shape == y.shape
-    assert len(rho.shape) == 1 and rho.shape[0] == s.shape[1]
+    assert len(rho.shape) == 1 and rho.shape[0] == s.shape[0]
     assert len(q.shape) == 1 and q.shape[0] == s.shape[1]
     assert m >= 1
-    assert s.shape[0] > m
+    assert s.shape[0] >= m
 
-    alpha = np.empty(shape=(m,), dtype=float)
-    for i in range(m - 2, 1, -1):  # k - 1, ..., k - m
+    alpha = np.empty(shape=(m - 1,), dtype=float)
+    for i in range(m - 2, -1, -1):  # k - 1, ..., k - m
         alpha[i] = rho[i] * np.dot(s[i], q)
         q = q - alpha[i] * y[i]
-    
-    gamma_k = gamma_scale(s[m], y[m])
+
+    gamma_k = gamma_scale(s[m - 1], y[m - 1])
     r = gamma_k * q
     for i in range(m - 1):
         beta = rho[i] * np.dot(y[i], r)
-        r += s[i] * (alpha[i] - beta)
+        r = r + s[i] * (alpha[i] - beta)
 
     return r
 
@@ -181,10 +182,10 @@ def lbfgs(
     # params
     fun: tp.Callable[[np.ndarray, np.ndarray], tuple[floating, np.ndarray]],
     max_iter: int,
+    max_ls: int,
     tol: floating,
     c1: floating,
     c2: floating,
-    max_ls: int,
     # updates
     x0: np.ndarray,
     params: np.ndarray,
@@ -199,9 +200,10 @@ def lbfgs(
     fun0, grad0 =  fun(params, x0)
     s = np.empty(shape=(m, x0.size))
     y = np.empty(shape=(m, x0.size))
-    rho = np.empty(shape=(x0.size,))
+    rho = np.empty(shape=(m,))
 
     while iter < m and np.dot(grad0, grad0) >= tol**2:
+        print(iter, x0, fun0, -grad0)
         if iter == 0:
             p1 = -grad0
         else:
@@ -218,8 +220,12 @@ def lbfgs(
         # alpha_lo, phi_lo, phip_lo
         zoom_params.extend([0.0, phi_zero, phip_zero])
         # alpha_hi, phi_hi, phip_hi
-        zoom_params.extend([1.0, *phi(1.0)])
+        zoom_params.extend([1.0, *phi(1.0)[:2]])
         alpha1, fun1, grad1 = zoom(*zoom_params)
+
+        if np.isnan(alpha1):
+            print(iter, zoom_params)
+
         x1 = x0 + alpha1 * p1
 
         s[iter] = x1 - x0
