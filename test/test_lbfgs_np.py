@@ -3,9 +3,13 @@
 # import pytest
 import functools
 import numpy as np
+import jax
+import jax.numpy as jnp
 import lbfgs.lbfgs_np as lbfgs_np
 import scipy.optimize as sci_opt
 import scipy.interpolate as sci_interp
+
+jax.config.update("jax_enable_x64", True)
 
 
 def cubic_coeffs(alpha0, phi0, phip0, alpha1, phi1, phip1):
@@ -73,7 +77,7 @@ def test_zoom():
             phi=phi,
             phi_zero=phi(0.0)[0],
             phip_zero=phi(0.0)[1],
-            grad_f_zero=phi(0.0)[2],
+            grad_f_hi=phi(1.0)[2],
             alpha_lo=0.0,
             phi_lo=phi(0.0)[0],
             phip_lo=phi(0.0)[1],
@@ -116,3 +120,67 @@ def test_hess_vec_product():
     check = hess_vec_product(q, s, y, m=m_prod)
 
     assert np.allclose(res, check)
+
+
+fun_np_counter = 0
+
+
+def test_lbfgs():
+    rng = np.random.default_rng(67)
+
+    sol_rosenbrock = np.array([1.0, 1.0])
+    x0_rosenbrock = sol_rosenbrock + rng.uniform(-1, 1, 2)
+
+    def rosenbrock(x: jax.Array) -> jax.Array:
+        assert len(x.shape) == 1 and x.size == 2
+        x1, x2 = x
+        f1 = 10.0 * (x2 - x1**2)
+        f2 = 1.0 - x1
+        return jnp.squeeze(f1**2 + f2**2)
+
+    sol_freudenstein_roth = np.array([5.0, 4.0])
+    x0_freudenstein_roth = sol_freudenstein_roth + rng.uniform(-1, 1, 2)
+
+    def freudenstein_roth(x: jax.Array) -> jax.Array:
+        x1, x2 = x
+        f1 = -13.0 + x1 + ((5.0 - x2) * x2 - 2.0) * x2
+        f2 = -29.0 + x1 + ((x2 + 1.0) * x2 - 14.0) * x2
+        return jnp.squeeze(f1**2 + f2**2)
+
+    sol_brown = np.array([1.0e6, 2.0e-6])
+    x0_brown = np.array([1.0, 1.0]) + rng.uniform(-1, 1, 2)
+
+    def brown(x: jax.Array) -> jax.Array:
+        x1, x2 = x
+        f1 = x1 - 1e6
+        f2 = x2 - 2.0 * 1e-6
+        f3 = x1 * x2 - 2.0
+        return jnp.squeeze(f1**2 + f2**2 + f3**2)
+
+    problems = [
+        (sol_rosenbrock, x0_rosenbrock, rosenbrock),
+        (sol_freudenstein_roth, x0_freudenstein_roth, freudenstein_roth),
+        (sol_brown, x0_brown, brown),
+    ]
+
+    for sol, x0, fun in problems:
+        fun_jax = jax.value_and_grad(fun)
+
+        def fun_np(_: np.ndarray, x: np.ndarray) -> tuple[float, np.ndarray]:
+            global fun_np_counter
+            fun_np_counter += 1
+            res = fun_jax(x)
+            return float(res[0]), np.array(res[1])
+
+        fun_np_counter = 0
+        res = lbfgs_np.lbfgs(
+            fun=fun_np,
+            max_iter=16,
+            max_ls=2,
+            tol=1e-12,
+            c1=1e-4,
+            c2=0.9,
+            x0=x0,
+            params=np.array([]),
+        )
+        assert np.allclose(res[0], sol), f"{fun.__name__}, {x0}"

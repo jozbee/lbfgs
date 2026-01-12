@@ -11,6 +11,7 @@ From Nocedal and Wright (2006):
 * Algorithm 7.5: L-BFGS
 """
 
+import warnings
 import numpy as np
 import typing as tp
 
@@ -40,7 +41,11 @@ def cubic_interp(
     Returns: $alpha_{i + 1}$.
     """
     d1 = phip0 + phip1 - 3.0 * (phi0 - phi1) / (alpha0 - alpha1)
-    d2 = np.sign(alpha1 - alpha0) * np.sqrt(d1**2 - phip0 * phip1)
+    disc = d1**2 - phip0 * phip1  # discriminant
+    if disc > 0:
+        d2 = np.sign(alpha1 - alpha0) * np.sqrt(d1**2 - phip0 * phip1)
+    else:
+        d2 = 0
     frac = (phip1 + d2 - d1) / (phip1 - phip0 + 2.0 * d2)
     return alpha1 - (alpha1 - alpha0) * frac
 
@@ -53,7 +58,7 @@ def zoom(
     phi: tp.Callable[[floating], tuple[floating, floating, np.ndarray]],
     phi_zero: floating,
     phip_zero: floating,
-    grad_f_zero: np.ndarray,
+    grad_f_hi: np.ndarray,
     # updates
     alpha_lo: floating,  # e.g., 0.0
     phi_lo: floating,
@@ -88,10 +93,15 @@ def zoom(
     * phip_hi -> $\phi'(\alpha_{\mathrm{hi}})$
     Returns: $(\alpha_*, \phi(\alpha_*), \phi'(\alpha_*))$
     """
-    alpha_j = np.nan
-    phi_j = np.nan
-    grad_f_j = np.nan * grad_f_zero
+    alpha_j = 1.0
+    phi_j = phi_hi
+    phip_j = phip_hi
+    grad_f_j = grad_f_hi
     iter = 0
+
+    # we always enforce at least one iteration, if max_iter > 0
+    # seems to be productive in practice, but a little more expensive...
+    # more subtle stopping criteria seems subtle...
     is_done = False
 
     while not is_done and iter < max_iter:
@@ -100,7 +110,7 @@ def zoom(
             alpha_lo, phi_lo, phip_lo, alpha_hi, phi_hi, phip_hi)
         phi_j, phip_j, grad_f_j = phi(alpha_j)
 
-        if phi_j > phi_zero + c1 * alpha_j * phip_zero or phi_j >= phi_lo:
+        if phi_j >= phi_zero + c1 * alpha_j * phip_zero or phi_j >= phi_lo:
             alpha_hi = alpha_j
             phi_hi = phi_j
             phip_hi = phip_j
@@ -203,9 +213,9 @@ def lbfgs(
     rho = np.empty(shape=(m,))
 
     while iter < m and np.dot(grad0, grad0) >= tol**2:
-        print(iter, x0, fun0, -grad0)
         if iter == 0:
             p1 = -grad0
+            p1 = p1 / np.linalg.norm(p1)  # important enough to get a line
         else:
             p1 = -hess_vec_product(grad0, s, y, rho, iter)
 
@@ -215,22 +225,24 @@ def lbfgs(
 
         phi_zero = fun0
         phip_zero = np.dot(grad0, p1)
-        grad_f_zero = grad0
-        zoom_params = [c1, c2, max_ls, phi, phi_zero, phip_zero, grad_f_zero]
-        # alpha_lo, phi_lo, phip_lo
-        zoom_params.extend([0.0, phi_zero, phip_zero])
-        # alpha_hi, phi_hi, phip_hi
-        zoom_params.extend([1.0, *phi(1.0)[:2]])
-        alpha1, fun1, grad1 = zoom(*zoom_params)
-
-        if np.isnan(alpha1):
-            print(iter, zoom_params)
+        alpha_hi = 1.0
+        phi_hi, phip_hi, grad_f_hi = phi(alpha_hi)
+        zoom_params0 = [c1, c2, max_ls, phi, phi_zero, phip_zero, grad_f_hi]
+        zoom_params1 = [0.0, phi_zero, phip_zero, alpha_hi, phi_hi, phip_hi]
+        alpha1, fun1, grad1 = zoom(*(zoom_params0 + zoom_params1))
 
         x1 = x0 + alpha1 * p1
 
         s[iter] = x1 - x0
         y[iter] = grad1 - grad0
-        rho[iter] = 1.0 / np.dot(s[iter], y[iter])
+        rho[iter] = 1.0 / np.dot(s[iter], y[iter])  # might warn?
+
+        if np.any(np.isnan(x1)):
+            # break before something bad happens
+            warnings.warn(
+                f"detected nan in lbfgs, iter={iter}", category=UserWarning
+            )
+            break
 
         x0 = x1
         fun0 = fun1
