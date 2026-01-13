@@ -173,14 +173,17 @@ def test_lbfgs():
             return float(res[0]), np.array(res[1])
 
         fun_np_counter = 0
-        res = lbfgs_np.lbfgs(
+        opt_params = lbfgs_np.OptParamsLBFGS(
             fun=fun_np,
             max_iter=16,
             max_ls=2,
             tol=1e-12,
             c1=1e-4,
             c2=0.9,
+        )
+        res = lbfgs_np.lbfgs(
+            opt_params=opt_params,
             x0=x0,
-            params=np.array([]),
+            fun_params=np.array([]),
         )
         assert np.allclose(res[0], sol), f"{fun.__name__}, {x0}"
