@@ -1,7 +1,7 @@
 """Simple lbfgs implementation, in numpy.
 
 Notes
-----------
+-----
 From Nocedal and Wright (2006):
 * Equation (3.59): cubic interpolation formula
 * Algorithm 3.6: zoom subroutine (for line search)
@@ -122,7 +122,7 @@ def zoom(
             if np.abs(phip_j) <= -c2 * phip_zero:
                 is_done = True
             else:
-                if phip_j * (alpha_hi - alpha_lo):
+                if phip_j * (alpha_hi - alpha_lo) >= 0:
                     alpha_hi = alpha_lo
                     phi_hi = phi_lo
                     phip_hi = phip_lo
