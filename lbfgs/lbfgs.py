@@ -22,7 +22,7 @@ import jax.numpy as jnp
 
 # fun(params, x) -> (value, grad)
 fun_tp: tp.TypeAlias = tp.Callable[
-    [jax.Array, jax.Array], tuple[jax.Array, jax.Array]
+    [tp.Any, jax.Array], tuple[jax.Array, jax.Array]
 ]
 
 
@@ -32,13 +32,6 @@ def _static_field() -> tp.Any:
 
 def _dyn_field() -> tp.Any:
     return dataclasses.field()
-
-
-def _init_field(arr: tp.Any) -> tp.Any:
-    """Initialize a field with the same shape as the input array."""
-    return dataclasses.field(
-        default_factory=lambda: arr,
-    )
 
 
 def cubic_interp(
