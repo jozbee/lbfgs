@@ -167,30 +167,36 @@ def test_hess_vec_product():
     rng = np.random.default_rng(42)
     n = 20
     m = 4
-    jax_hess_vec_product = jax.jit(lbfgs.hess_vec_product)
 
-    for iter in range(3):
-        s = rng.uniform(-1, 1, size=n * m).reshape(n, m)
-        y = rng.uniform(-1, 1, size=n * m).reshape(n, m)
-        rho = np.array([1.0 / np.dot(s[i], y[i]) for i in range(n)])
-        q = rng.uniform(-1, 1, size=m)
+    def loop_test(jax_hess_vec_product):
+        for iter in range(3):
+            s = rng.uniform(-1, 1, size=n * m).reshape(n, m)
+            y = rng.uniform(-1, 1, size=n * m).reshape(n, m)
+            rho = np.array([1.0 / np.dot(s[i], y[i]) for i in range(n)])
+            q = rng.uniform(-1, 1, size=m)
 
-        m_prod = 5
-        res = jax_hess_vec_product(q, s, y, rho, m=m_prod)
-        check = hess_vec_product(q, s, y, m=m_prod)
+            m_prod = 5
+            res = jax_hess_vec_product(q, s, y, rho, m=m_prod)
+            check = hess_vec_product(q, s, y, m=m_prod)
 
-        assert np.allclose(res, check), f"iter={iter}"
+            assert np.allclose(res, check), f"iter={iter}"
+
+    loop_test(jax.jit(lbfgs.hess_vec_product))
+    loop_test(jax.jit(functools.partial(lbfgs.hess_vec_product, unroll=True)))
 
 
 def test_lbfgs():
 
     problems = [
-        (sol_rosenbrock, x0_rosenbrock, rosenbrock),
-        (sol_freudenstein_roth, x0_freudenstein_roth, freudenstein_roth),
-        (sol_brown, x0_brown, brown),
+        (sol_rosenbrock, x0_rosenbrock, rosenbrock, False),
+        (sol_rosenbrock, x0_rosenbrock, rosenbrock, True),
+        (sol_freudenstein_roth, x0_freudenstein_roth, freudenstein_roth, False),
+        (sol_freudenstein_roth, x0_freudenstein_roth, freudenstein_roth, True),
+        (sol_brown, x0_brown, brown, False),
+        (sol_brown, x0_brown, brown, True),
     ]
 
-    for sol, x0, fun in problems:
+    for sol, x0, fun, unroll in problems:
         fun_jax = jax.value_and_grad(fun)
 
         @jax.jit
@@ -209,6 +215,7 @@ def test_lbfgs():
             ),
             x0=x0,
             fun_params=jnp.array([]),
+            unroll=unroll,
         )
 
-        assert np.allclose(res[0], sol), f"{fun.__name__}, {x0}"
+        assert np.allclose(res[0], sol), f"{fun.__name__}, {x0}, {unroll}"

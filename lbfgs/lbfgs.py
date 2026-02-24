@@ -91,6 +91,7 @@ def zoom(
     alpha_hi: jax.Array,  # e.g., 1.0
     phi_hi: jax.Array,
     phip_hi: jax.Array,
+    unroll: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     r"""Zoom line search.
 
@@ -227,7 +228,12 @@ def zoom(
         iter=jnp.array(0),
         is_done=jnp.array(False),
     )
-    res_state = jax.lax.while_loop(cond_fun, body_fun, zoom_state)
+    if not unroll:
+        res_state = jax.lax.while_loop(cond_fun, body_fun, zoom_state)
+    else:
+        res_state = zoom_state
+        for _ in range(params.max_iter):
+            res_state = body_fun(res_state)
 
     # also handles case when `is_done == False`
     alpha_star = res_state.alpha_j
@@ -258,6 +264,7 @@ def hess_vec_product(
     y: jax.Array,
     rho: jax.Array,
     m: jax.Array,
+    unroll: bool = False,
 ) -> jax.Array:
     r"""Efficient L-BFGS matrix vector product.
 
@@ -289,14 +296,6 @@ def hess_vec_product(
         q = q - alpha_i * y[i]
         return i - 1, q, alpha.at[i].set(alpha_i)
 
-    alpha = jnp.empty(s.shape[0] - 1)
-    _, q, alpha = jax.lax.while_loop(
-        backward_cond, backward_body, (m - 2, q, alpha)
-    )
-
-    gamma_k = gamma_scale(s[m - 1], y[m - 1])
-    r = gamma_k * q
-
     def forward_cond(state):
         i, _ = state
         return i <= m - 2
@@ -307,7 +306,38 @@ def hess_vec_product(
         r = r + s[i] * (alpha[i] - beta)
         return i + 1, r
 
-    _, r = jax.lax.while_loop(forward_cond, forward_body, (jnp.array(0), r))
+    alpha = jnp.zeros(s.shape[0] - 1)
+    gamma_k = gamma_scale(s[m - 1], y[m - 1])
+
+    if not unroll:
+        _, q, alpha = jax.lax.while_loop(
+            backward_cond, backward_body, (m - 2, q, alpha)
+        )
+        r = gamma_k * q
+        _, r = jax.lax.while_loop(forward_cond, forward_body, (jnp.array(0), r))
+    else:
+        # unrolling these for loops is somewhat subtle in jax's back
+        #  propogation autodiff
+        # namely, we need to perform extra loops than desired in general
+        # so, we ensure that extra loop iterations add zero
+        m_unroll = s.shape[0]
+
+        def zeroed(arr):
+            m_indices = jnp.arange(m_unroll) <= m - 2
+            if len(arr.shape) == 2:
+                m_indices = jnp.squeeze(
+                    jnp.tile(m_indices.reshape(-1, 1), reps=(1, arr.shape[1]))
+                )
+            return jnp.where(m_indices, arr, 0.0)
+
+        s = zeroed(s)
+        y = zeroed(y)
+        rho = zeroed(rho)
+        for i in range(m_unroll - 2, -1, -1):
+            _, q, alpha = backward_body((i, q, alpha))
+        r = gamma_k * q
+        for i in range(0, m_unroll - 2 + 1):
+            _, r = forward_body((i, r))
 
     return r
 
@@ -357,6 +387,7 @@ def lbfgs(
     opt_params: OptParamsLBFGS,
     x0: jax.Array,
     fun_params: jax.Array,
+    unroll: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Stripped LBFGS routine for jax.
 
@@ -376,10 +407,22 @@ def lbfgs(
     fun_params :
         Parameters for cost function in `opt_params`.
         The cost function must have parameters, even if they are ignored.
+    unroll :
+        False to check gradient condition for early exit.
+        True to use static-iterations, for reverse-mode differentation.
 
     Returns
     -------
     The triple (minimizer, value at minimizer, gradient at minimizer).
+
+    Notes
+    -----
+    Usually `unroll` should be set to False.
+    Allowing `unroll == True` allows reverse-mode differentiation, which is
+    desired for approximate minimization calls.
+    Namely, implementing an implicit function theorem for the lbfgs routine
+    would be more accurate for computing derivatives, unless the lbfgs routine
+    returns results that are far from the (local) minimizer.
     """
     assert len(x0.shape) == 1 and x0.size >= 1
     assert opt_params.tol > 0
@@ -389,9 +432,9 @@ def lbfgs(
 
     iter = jnp.array(0)
     fun0, grad0 = opt_params.fun(fun_params, x0)
-    s = jnp.empty(shape=(m, x0.size))
-    y = jnp.empty(shape=(m, x0.size))
-    rho = jnp.empty(shape=(m,))
+    s = jnp.zeros(shape=(m, x0.size))
+    y = jnp.zeros(shape=(m, x0.size))
+    rho = jnp.zeros(shape=(m,))
 
     @jax.tree_util.register_dataclass
     @dataclasses.dataclass
@@ -411,10 +454,11 @@ def lbfgs(
 
     def while_body(state: LBFGSState) -> LBFGSState:
         st = state
+        p1 = -hess_vec_product(st.grad0, st.s, st.y, st.rho, st.iter, unroll)
         p1 = jax.lax.cond(
             st.iter == 0,
             lambda: -st.grad0 / jnp.linalg.norm(st.grad0),
-            lambda: -hess_vec_product(st.grad0, st.s, st.y, st.rho, st.iter),
+            lambda: p1,
         )
 
         def phi(alpha: float | jax.Array) -> tuple[jax.Array, jax.Array]:
@@ -447,6 +491,7 @@ def lbfgs(
             alpha_hi=alpha_hi,
             phi_hi=phi_hi,
             phip_hi=phip_hi,
+            unroll=unroll,
         )
 
         x1 = st.x0 + alpha1 * p1
@@ -465,5 +510,10 @@ def lbfgs(
         return st
 
     state0 = LBFGSState(x0, fun0, grad0, iter, s, y, rho)
-    res = jax.lax.while_loop(while_cond, while_body, state0)
+    if not unroll:
+        res = jax.lax.while_loop(while_cond, while_body, state0)
+    if unroll:
+        res = state0
+        for _ in range(opt_params.max_iter):
+            res = while_body(res)
     return res.x0, res.fun0, res.grad0
