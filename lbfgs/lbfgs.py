@@ -60,8 +60,8 @@ def cubic_interp(
     disc = d1**2 - phip0 * phip1  # discriminant
     d2 = jax.lax.cond(
         disc > 0.0,
-        lambda: jnp.sign(alpha1 - alpha0) * jnp.sqrt(d1**2 - phip0 * phip1),
-        lambda: 0.0
+        lambda: jnp.sign(alpha1 - alpha0) * jnp.sqrt(disc),
+        lambda: 0.0,
     )
     frac = (phip1 + d2 - d1) / (phip1 - phip0 + 2.0 * d2)
     return alpha1 - (alpha1 - alpha0) * frac
@@ -206,10 +206,10 @@ def zoom(
                 lambda: s.update(_is_done=jnp.array(True)),  # wolfe2
                 lambda: jax.lax.cond(
                     flip_hi,
-                    lambda: s.update(**lo2hi),  # flip
-                    lambda: s.update(**lo2hi, **j2lo),  # default
-                )
-            )
+                    lambda: s.update(**lo2hi, **j2lo),  # flip
+                    lambda: s.update(**j2lo),  # default
+                ),
+            ),
         )
 
         return s
