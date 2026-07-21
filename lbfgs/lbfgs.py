@@ -26,8 +26,10 @@ fun_tp: tp.TypeAlias = tp.Callable[
 ]
 
 
-def _static_field() -> tp.Any:
-    return dataclasses.field(metadata=dict(static=True))
+def _static_field(val: tp.Any = None) -> tp.Any:
+    if val is None:
+        return dataclasses.field(metadata=dict(static=True))
+    return dataclasses.field(default=val, metadata=dict(static=True))
 
 
 def _dyn_field() -> tp.Any:
@@ -373,21 +375,33 @@ class OptParamsLBFGS:
         Cf. equation (3.7b) from [NW06].
         Note that $0 < c_1 < c_2 < 1$.
         General recommendation: 0.9.
+    init_norm :
+        Initial norm for first iteration of L-BFGS.
+        Note that the first step is essentially gradient descent with
+        a line search.
+    debug :
+        Flag to turn on extra debug print statements.
+        (Print statements work within debugger.)
+    unroll :
+        False to check gradient condition for early exit.
+        True to use static-iterations, for reverse-mode differentation.
     """
 
     fun: fun_tp = _static_field()
-    max_iter: int = _static_field()
-    max_ls: int = _static_field()
-    tol: float = _static_field()
-    c1: float = _static_field()
-    c2: float = _static_field()
+    max_iter: int = _static_field(16)
+    max_ls: int = _static_field(8)
+    tol: float = _static_field(1e-5)
+    c1: float = _static_field(1e-4)
+    c2: float = _static_field(0.9)
+    init_norm: float = _static_field(1.0)
+    debug: bool = _static_field(False)
+    unroll: bool = _static_field(False)
 
 
 def lbfgs(
     opt_params: OptParamsLBFGS,
     x0: jax.Array,
     fun_params: jax.Array,
-    unroll: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Stripped LBFGS routine for jax.
 
@@ -407,9 +421,6 @@ def lbfgs(
     fun_params :
         Parameters for cost function in `opt_params`.
         The cost function must have parameters, even if they are ignored.
-    unroll :
-        False to check gradient condition for early exit.
-        True to use static-iterations, for reverse-mode differentation.
 
     Returns
     -------
@@ -454,10 +465,13 @@ def lbfgs(
 
     def while_body(state: LBFGSState) -> LBFGSState:
         st = state
-        p1 = -hess_vec_product(st.grad0, st.s, st.y, st.rho, st.iter, unroll)
+        p1 = -hess_vec_product(
+            st.grad0, st.s, st.y, st.rho, st.iter, opt_params.unroll
+        )
+        init_norm = opt_params.init_norm
         p1 = jax.lax.cond(
             st.iter == 0,
-            lambda: -st.grad0 / jnp.linalg.norm(st.grad0),
+            lambda: -st.grad0 / jnp.linalg.norm(st.grad0) * init_norm,
             lambda: p1,
         )
 
@@ -471,7 +485,6 @@ def lbfgs(
         phi_hi, grad_f_hi = phi(alpha_hi)
         phip_hi = jnp.dot(grad_f_hi, p1)
 
-        
         alpha1, fun1, grad1 = zoom(
             params=ParamsZoom(
                 c1=opt_params.c1,
@@ -491,7 +504,7 @@ def lbfgs(
             alpha_hi=alpha_hi,
             phi_hi=phi_hi,
             phip_hi=phip_hi,
-            unroll=unroll,
+            unroll=opt_params.unroll,
         )
 
         x1 = st.x0 + alpha1 * p1
@@ -507,12 +520,38 @@ def lbfgs(
             lambda: (x1, fun1, grad1, st.iter + 1),
         )
 
+        if opt_params.debug:
+            jax.debug.print(
+                "norm(p1) = {norm}\n"
+                "alpha_lo = {t0}\n"
+                "phi_zero = {t1}\n"
+                "phip_zero = {t2}\n"
+                "alpha_hi = {t3}\n"
+                "phi_hi = {t4}\n"
+                "phip_hi = {t5}\n"
+                "alpha1 = {t6}\n"
+                "fun1 = {t7}\n"
+                "grad1 = {t8}\n"
+                "\n",
+                norm=jnp.linalg.norm(p1),
+                t0=alpha_lo,
+                t1=phi_zero,
+                t2=phip_zero,
+                t3=alpha_hi,
+                t4=phi_hi,
+                t5=phip_hi,
+                t6=alpha1,
+                t7=fun1,
+                t8=grad1,
+            )
+            # jax.debug.print("state = {state}", state=st)
+
         return st
 
     state0 = LBFGSState(x0, fun0, grad0, iter, s, y, rho)
-    if not unroll:
+    if not opt_params.unroll:
         res = jax.lax.while_loop(while_cond, while_body, state0)
-    if unroll:
+    if opt_params.unroll:
         res = state0
         for _ in range(opt_params.max_iter):
             res = while_body(res)
