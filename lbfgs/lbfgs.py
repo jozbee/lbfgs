@@ -16,20 +16,18 @@ from __future__ import annotations
 import copy
 import dataclasses
 import typing as tp
+
 import jax
 import jax.numpy as jnp
 
-
 # fun(params, x) -> (value, grad)
-fun_tp: tp.TypeAlias = tp.Callable[
-    [tp.Any, jax.Array], tuple[jax.Array, jax.Array]
-]
+type Fun = tp.Callable[[tp.Any, jax.Array], tuple[jax.Array, jax.Array]]
 
 
 def _static_field(val: tp.Any = None) -> tp.Any:
     if val is None:
-        return dataclasses.field(metadata=dict(static=True))
-    return dataclasses.field(default=val, metadata=dict(static=True))
+        return dataclasses.field(metadata={"static": True})
+    return dataclasses.field(default=val, metadata={"static": True})
 
 
 def _dyn_field() -> tp.Any:
@@ -73,10 +71,11 @@ def cubic_interp(
 @dataclasses.dataclass
 class ParamsZoom:
     """Zoom parameters (documented in the `Notes` section of `zoom`)."""
-    c1: float = _static_field() # e.g., 10**-4
-    c2: float = _static_field() # e.g., 0.9
-    max_iter: int = _static_field() # e.g., `np.iinfo(np.int64).max`
-    fun: fun_tp = _static_field()
+
+    c1: float = _static_field()  # e.g., 10**-4
+    c2: float = _static_field()  # e.g., 0.9
+    max_iter: int = _static_field()  # e.g., `np.iinfo(np.int64).max`
+    fun: Fun = _static_field()
     fun_params: jax.Array = _dyn_field()
     x0: jax.Array = _dyn_field()
     p: jax.Array = _dyn_field()
@@ -142,7 +141,7 @@ def zoom(
         # more subtle stopping criteria seems subtle...
         is_done: jax.Array
 
-        def update(self, **kwargs) -> "ZoomState":
+        def update(self, **kwargs) -> ZoomState:
             res = copy.copy(self)  # shallow
             res.__dict__.update(**kwargs)
             return res
@@ -190,15 +189,13 @@ def zoom(
         wolfe2 = jnp.abs(s.phip_j) <= -p.c2 * phip_zero
         flip_hi = s.phip_j * (s.alpha_hi - s.alpha_lo) >= 0
 
-        j2hi = dict(
-            alpha_hi=s.alpha_j, phi_hi=s.phi_j, phip_hi=s.phip_j
-        )
-        lo2hi = dict(
-            alpha_hi=s.alpha_lo, phi_hi=s.phi_lo, phip_hi=s.phip_lo
-        )
-        j2lo = dict(
-            alpha_lo=s.alpha_j, phi_lo=s.phi_j, phip_lo=s.phip_j
-        )
+        j2hi = {"alpha_hi": s.alpha_j, "phi_hi": s.phi_j, "phip_hi": s.phip_j}
+        lo2hi = {
+            "alpha_hi": s.alpha_lo,
+            "phi_hi": s.phi_lo,
+            "phip_hi": s.phip_lo,
+        }
+        j2lo = {"alpha_lo": s.alpha_j, "phi_lo": s.phi_j, "phip_lo": s.phip_j}
 
         s = jax.lax.cond(
             wolfe1,
@@ -338,7 +335,7 @@ def hess_vec_product(
         for i in range(m_unroll - 2, -1, -1):
             _, q, alpha = backward_body((i, q, alpha))
         r = gamma_k * q
-        for i in range(0, m_unroll - 2 + 1):
+        for i in range(0, m_unroll - 2 + 1):  # noqa: PIE808
             _, r = forward_body((i, r))
 
     return r
@@ -387,7 +384,7 @@ class OptParamsLBFGS:
         True to use static-iterations, for reverse-mode differentation.
     """
 
-    fun: fun_tp = _static_field()
+    fun: Fun = _static_field()
     max_iter: int = _static_field(16)
     max_ls: int = _static_field(8)
     tol: float = _static_field(1e-5)
