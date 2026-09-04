@@ -17,5 +17,6 @@ mathematically exact and strictly cheaper.  It is bitwise exact in
 operation from the compiled program, so the directional derivative, and
 with it the accepted line-search step, can move by a few ulp -- up to
 `1e-8` relative on the iterate of the MPC problem this was written for.
-The count is an upper bound when the gradient tolerance (or, in the numpy
-version, the strong Wolfe exit of `zoom`) stops a loop early.
+The count is an upper bound: in both versions `zoom` returns as soon as
+the strong Wolfe conditions hold, and the outer loop returns as soon as
+the gradient tolerance is met.

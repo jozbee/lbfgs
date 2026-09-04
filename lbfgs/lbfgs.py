@@ -202,7 +202,7 @@ def zoom(
             lambda: s.update(**j2hi),  # wolfe1
             lambda: jax.lax.cond(
                 wolfe2,
-                lambda: s.update(_is_done=jnp.array(True)),  # wolfe2
+                lambda: s.update(is_done=jnp.array(True)),  # wolfe2
                 lambda: jax.lax.cond(
                     flip_hi,
                     lambda: s.update(**lo2hi, **j2lo),  # flip
@@ -437,8 +437,9 @@ def lbfgs(
     program, so the accepted step can move by a few ulp of the
     directional derivative; on the MPC problem this was written for that
     is up to `1e-8` relative on the iterate.)
-    The count is an upper bound whenever the gradient tolerance stops the
-    loop early.
+    The count is an upper bound: `zoom` returns as soon as the strong
+    Wolfe conditions hold, and the L-BFGS loop returns as soon as the
+    gradient tolerance is met.
 
     Usually `unroll` should be set to False.
     Allowing `unroll == True` allows reverse-mode differentiation, which is

@@ -79,6 +79,12 @@ def brown(x: jax.Array) -> jax.Array:
     return jnp.squeeze(f1**2 + f2**2 + f3**2)
 
 
+def quadratic(x: jax.Array) -> jax.Array:
+    """Convex quadratic; the cubic model of the line search is exact here."""
+    w = jnp.array([1.0, 10.0, 100.0])
+    return jnp.squeeze(0.5 * jnp.sum(w * x**2))
+
+
 rng = np.random.default_rng(67)
 
 sol_rosenbrock = np.array([1.0, 1.0])
@@ -87,6 +93,10 @@ sol_freudenstein_roth = np.array([5.0, 4.0])
 x0_freudenstein_roth_np = sol_freudenstein_roth + rng.uniform(-1, 1, 2)
 sol_brown = np.array([1.0e6, 2.0e-6])
 x0_brown_np = np.array([1.0, 1.0]) + rng.uniform(-1, 1, 2)
+
+# small enough that the 1-d minimizer along the first (normalized)
+# search direction lies inside the initial bracket [0, 1]
+x0_quadratic = jnp.array([0.5, 0.5, 0.5])
 
 x0_rosenbrock = jnp.array(x0_rosenbrock_np)
 x0_freudenstein_roth = jnp.array(x0_freudenstein_roth_np)
@@ -322,39 +332,68 @@ def lbfgs_reeval(
     return res.x0, res.fun0, res.grad0
 
 
-def test_fun_eval_count():
-    """One call costs `1 + (1 + max_ls) * max_iter` evaluations."""
-    fun_val_grad = jax.value_and_grad(rosenbrock)
+def count_fun_evals(fun_base, x0, max_iter: int, max_ls: int) -> int:
+    """Run `lbfgs` and count how often it evaluates the objective."""
+    fun_val_grad = jax.value_and_grad(fun_base)
+    calls = 0
 
+    def fun(_: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
+        nonlocal calls
+        calls += 1
+        return fun_val_grad(x)
+
+    # `disable_jit` makes the `lax` loops run as python loops, so the
+    # python counter sees every evaluation.
+    with jax.disable_jit():
+        lbfgs.lbfgs(
+            opt_params=lbfgs.OptParamsLBFGS(
+                fun=fun,
+                max_iter=max_iter,
+                max_ls=max_ls,
+                tol=1e-12,
+                c1=1e-4,
+                c2=0.9,
+                unroll=False,
+            ),
+            x0=x0,
+            fun_params=jnp.array([]),
+        )
+    return calls
+
+
+def test_fun_eval_count():
+    """`1 + (1 + max_ls) * max_iter` bounds the number of evaluations.
+
+    The bound is not tight, because `zoom` returns as soon as the strong
+    Wolfe conditions hold and the L-BFGS loop returns on `tol`.  It is
+    exceeded as soon as `phi(0)` is re-evaluated instead of reusing
+    `fun0` / `grad0`.
+    """
     for max_iter in (1, 3):
         for max_ls in (1, 2):
-            calls = 0
-
-            def fun(_: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
-                nonlocal calls
-                calls += 1
-                return fun_val_grad(x)
-
-            # `disable_jit` makes the `lax` loops run as python loops, so
-            # the python counter sees every evaluation.
-            with jax.disable_jit():
-                lbfgs.lbfgs(
-                    opt_params=lbfgs.OptParamsLBFGS(
-                        fun=fun,
-                        max_iter=max_iter,
-                        max_ls=max_ls,
-                        tol=1e-12,
-                        c1=1e-4,
-                        c2=0.9,
-                        unroll=False,
-                    ),
-                    x0=x0_rosenbrock,
-                    fun_params=jnp.array([]),
-                )
-
-            expect = 1 + (1 + max_ls) * max_iter
+            calls = count_fun_evals(
+                rosenbrock, x0_rosenbrock, max_iter, max_ls
+            )
             msg = f"max_iter={max_iter}, max_ls={max_ls}"
-            assert calls == expect, msg
+            assert 1 + max_iter <= calls, msg
+            assert calls <= 1 + (1 + max_ls) * max_iter, msg
+
+
+def test_zoom_early_exit_saves_evaluations():
+    """The strong Wolfe exit of `zoom` really does cut evaluations.
+
+    On a quadratic the cubic model of the line search is exact, so the
+    first interpolation lands on the 1-d minimizer, where
+    `|phi'| <= -c2 * phi'(0)` holds.  `zoom` returns after that one
+    iteration, so a generous `max_ls` costs no more than `max_ls == 1`.
+    """
+    for max_iter in (2, 3):
+        one_ls = count_fun_evals(quadratic, x0_quadratic, max_iter, 1)
+        three_ls = count_fun_evals(quadratic, x0_quadratic, max_iter, 3)
+        msg = f"max_iter={max_iter}"
+        assert one_ls == 1 + 2 * max_iter, msg
+        assert three_ls == one_ls, msg
+        assert three_ls < 1 + (1 + 3) * max_iter, msg
 
 
 def test_lbfgs_unchanged_by_phi_zero_reuse():
