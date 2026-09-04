@@ -85,6 +85,29 @@ def quadratic(x: jax.Array) -> jax.Array:
     return jnp.squeeze(0.5 * jnp.sum(w * x**2))
 
 
+def ill_conditioned_quadratic(n=300, cond=1e6, seed=11):
+    """A random `n`-dimensional quadratic with condition number `cond`.
+
+    Long enough, and badly enough scaled, that the reductions inside the
+    solver accumulate rounding.
+
+    Returns
+    -------
+    The pair (objective, starting point).
+    """
+    rng = np.random.default_rng(seed)
+    basis, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    spectrum = np.diag(np.logspace(0.0, np.log10(cond), n))
+    hess = jnp.array(basis @ spectrum @ basis.T)
+    hess = 0.5 * (hess + hess.T)  # exactly symmetric again
+    x0 = jnp.array(rng.normal(size=n))
+
+    def fun(x: jax.Array) -> jax.Array:
+        return 0.5 * jnp.dot(x, hess @ x)
+
+    return fun, x0
+
+
 rng = np.random.default_rng(67)
 
 sol_rosenbrock = np.array([1.0, 1.0])
@@ -396,18 +419,42 @@ def test_zoom_early_exit_saves_evaluations():
         assert three_ls < 1 + (1 + 3) * max_iter, msg
 
 
-def test_lbfgs_unchanged_by_phi_zero_reuse():
-    """Reusing `phi(0)` leaves the returned iterate unchanged.
+def run_reuse_pair(fun_base, x0, max_iter: int, max_ls: int, unroll: bool):
+    """Run `lbfgs` and the re-evaluating oracle on the same problem.
 
-    On the 2-d Rosenbrock the agreement is still bitwise, but that is a
-    property of this small program rather than a guarantee; cf. the
-    docstring of `lbfgs_reeval`.
+    Returns
+    -------
+    The pair of (minimizer, value, gradient) triples.
     """
-    fun_val_grad = jax.value_and_grad(rosenbrock)
+    fun_val_grad = jax.value_and_grad(fun_base)
 
     def fun(_: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
         return fun_val_grad(x)
 
+    opt_params = lbfgs.OptParamsLBFGS(
+        fun=fun,
+        max_iter=max_iter,
+        max_ls=max_ls,
+        tol=1e-12,
+        c1=1e-4,
+        c2=0.9,
+        unroll=unroll,
+    )
+    call = {
+        "opt_params": opt_params,
+        "x0": x0,
+        "fun_params": jnp.array([]),
+    }
+    return lbfgs.lbfgs(**call), lbfgs_reeval(**call)
+
+
+def test_lbfgs_unchanged_by_phi_zero_reuse():
+    """Reusing `phi(0)` does not move the returned iterate.
+
+    On the 2-d Rosenbrock the two loops still agree bitwise; on a long
+    ill-conditioned problem they agree to rounding, cf. the comment
+    below and the docstring of `lbfgs_reeval`.
+    """
     settings = [
         (2, 1, False),
         (3, 2, False),
@@ -416,25 +463,26 @@ def test_lbfgs_unchanged_by_phi_zero_reuse():
         (3, 2, True),
     ]
     for max_iter, max_ls, unroll in settings:
-        opt_params = lbfgs.OptParamsLBFGS(
-            fun=fun,
-            max_iter=max_iter,
-            max_ls=max_ls,
-            tol=1e-12,
-            c1=1e-4,
-            c2=0.9,
-            unroll=unroll,
+        res, ref = run_reuse_pair(
+            rosenbrock, x0_rosenbrock, max_iter, max_ls, unroll
         )
-        res = lbfgs.lbfgs(
-            opt_params=opt_params,
-            x0=x0_rosenbrock,
-            fun_params=jnp.array([]),
-        )
-        ref = lbfgs_reeval(
-            opt_params=opt_params,
-            x0=x0_rosenbrock,
-            fun_params=jnp.array([]),
-        )
-        msg = f"max_iter={max_iter}, max_ls={max_ls}, unroll={unroll}"
+        msg = f"rosenbrock: max_iter={max_iter}, max_ls={max_ls}"
+        msg += f", unroll={unroll}"
         for got, want, name in zip(res, ref, ["x", "fun", "grad"]):
             assert np.array_equal(got, want), f"{name}: {msg}"
+
+    # 300 dimensions, condition number 1e6: bitwise equality is not
+    # guaranteed here and does not hold.  The reused `(fun0, grad0)` are
+    # the same numbers `phi(0)` would return, but deleting that
+    # evaluation changes the loop XLA compiles, which is free to fuse
+    # and order the surviving 300-term reductions differently.  A few
+    # ulp on `phip_zero` move the interpolated step, and the L-BFGS
+    # recursion carries that forward: the answers agree to about `1e-11`
+    # relative, not to the last bit.
+    quad, x0_quad = ill_conditioned_quadratic()
+    for max_iter, max_ls in ((8, 2), (12, 2)):
+        res, ref = run_reuse_pair(quad, x0_quad, max_iter, max_ls, False)
+        msg = f"quadratic: max_iter={max_iter}, max_ls={max_ls}"
+        for got, want, name in zip(res, ref, ["x", "fun", "grad"]):
+            close = np.allclose(got, want, rtol=1e-8, atol=0.0)
+            assert close, f"{name}: {msg}"
