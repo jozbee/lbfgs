@@ -14,7 +14,7 @@ jax.config.update("jax_enable_x64", True)
 
 def cubic_coeffs(alpha0, phi0, phip0, alpha1, phi1, phip1):
     A = np.array([
-        [1.0, alpha0, alpha0**2, alpha0**2],
+        [1.0, alpha0, alpha0**2, alpha0**3],
         [0.0, 1.0, 2.0 * alpha0, 3.0 * alpha0**2],
         [1.0, alpha1, alpha1**2, alpha1**3],
         [0.0, 1.0, 2.0 * alpha1, 3.0 * alpha1**2],
@@ -187,3 +187,49 @@ def test_lbfgs():
             fun_params=np.array([]),
         )
         assert np.allclose(res[0], sol), f"{fun.__name__}, {x0}"
+
+
+def test_fun_eval_count():
+    """`1 + (1 + max_ls) * max_iter` bounds the number of evaluations.
+
+    The numpy `zoom` honours the strong Wolfe exit, so the bound is not
+    tight; it is exceeded as soon as `phi(0)` is re-evaluated instead of
+    reusing `fun0` / `grad0`.
+    """
+    rng = np.random.default_rng(67)
+    x0 = np.array([1.0, 1.0]) + rng.uniform(-1, 1, 2)
+
+    def rosenbrock(x: jax.Array) -> jax.Array:
+        x1, x2 = x
+        return jnp.squeeze((10.0 * (x2 - x1**2)) ** 2 + (1.0 - x1) ** 2)
+
+    fun_jax = jax.value_and_grad(rosenbrock)
+
+    for max_iter in (1, 3):
+        for max_ls in (1, 2):
+            calls = 0
+
+            def fun_np(
+                _: np.ndarray, x: np.ndarray
+            ) -> tuple[float, np.ndarray]:
+                nonlocal calls
+                calls += 1
+                val, grad = fun_jax(x)
+                return float(val), np.array(grad)
+
+            lbfgs_np.lbfgs(
+                opt_params=lbfgs_np.OptParamsLBFGS(
+                    fun=fun_np,
+                    max_iter=max_iter,
+                    max_ls=max_ls,
+                    tol=1e-12,
+                    c1=1e-4,
+                    c2=0.9,
+                ),
+                x0=x0,
+                fun_params=np.array([]),
+            )
+
+            msg = f"max_iter={max_iter}, max_ls={max_ls}"
+            assert 1 + max_iter <= calls, msg
+            assert calls <= 1 + (1 + max_ls) * max_iter, msg

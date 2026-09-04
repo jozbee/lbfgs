@@ -258,6 +258,22 @@ def lbfgs(
     Returns
     -------
     The triple (minimizer, value at minimizer, gradient at minimizer).
+
+    Notes
+    -----
+    One call evaluates `opt_params.fun` (value and gradient together) at
+    most
+
+        1 + (1 + max_ls) * max_iter
+
+    times: once for the initial point, then per L-BFGS iteration once at
+    the unit step `alpha = 1` and up to `max_ls` times inside `zoom`.
+    The line search reuses `fun0`/`grad0` for `phi(0)` instead of
+    re-evaluating it, which would make the count
+    `1 + (2 + max_ls) * max_iter`.
+    Unlike the jax version, `zoom` here can stop early on the strong Wolfe
+    conditions, and the gradient tolerance can stop the outer loop early,
+    so the count is an upper bound.
     """
     assert len(x0.shape) == 1 and x0.size >= 1
     assert opt_params.tol > 0
@@ -283,6 +299,9 @@ def lbfgs(
             res = opt_params.fun(fun_params, x0 + alpha * p1)
             return res[0], np.dot(res[1], p1), res[1]
 
+        # phi(0) is already known: `x0 + 0.0 * p1` is bitwise `x0` and
+        # `fun` is deterministic, so re-evaluating it would cost one call
+        # per iteration for a bitwise identical result.
         phi_zero = fun0
         phip_zero = np.dot(grad0, p1)
         alpha_hi = 1.0

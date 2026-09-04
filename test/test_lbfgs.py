@@ -1,6 +1,7 @@
 """Tests for stripped lbfgs, numpy version."""
 
 # import pytest
+import dataclasses
 import functools
 import numpy as np
 import jax
@@ -19,7 +20,7 @@ jax.config.update("jax_enable_x64", True)
 
 def cubic_coeffs(alpha0, phi0, phip0, alpha1, phi1, phip1):
     A = np.array([
-        [1.0, alpha0, alpha0**2, alpha0**2],
+        [1.0, alpha0, alpha0**2, alpha0**3],
         [0.0, 1.0, 2.0 * alpha0, 3.0 * alpha0**2],
         [1.0, alpha1, alpha1**2, alpha1**3],
         [0.0, 1.0, 2.0 * alpha1, 3.0 * alpha1**2],
@@ -212,10 +213,183 @@ def test_lbfgs():
                 tol=1e-12,
                 c1=1e-4,
                 c2=0.9,
+                unroll=unroll,
             ),
             x0=x0,
             fun_params=jnp.array([]),
-            unroll=unroll,
         )
 
         assert np.allclose(res[0], sol), f"{fun.__name__}, {x0}, {unroll}"
+
+
+def lbfgs_reeval(
+    opt_params: lbfgs.OptParamsLBFGS,
+    x0: jax.Array,
+    fun_params: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """`lbfgs.lbfgs` as it was before `phi(0)` was reused, as an oracle.
+
+    The only difference to `lbfgs.lbfgs` is the marked line: the line
+    search re-evaluates the objective at `alpha_lo == 0.0` instead of
+    reusing `st.fun0` / `st.grad0`.  Because `x0 + 0.0 * p1` is bitwise
+    `x0` and the objective is deterministic, both must return bitwise
+    identical results.
+    """
+    m = opt_params.max_iter
+    fun0, grad0 = opt_params.fun(fun_params, x0)
+    s = jnp.zeros(shape=(m, x0.size))
+    y = jnp.zeros(shape=(m, x0.size))
+    rho = jnp.zeros(shape=(m,))
+
+    @jax.tree_util.register_dataclass
+    @dataclasses.dataclass
+    class State:
+        x0: jax.Array
+        fun0: jax.Array
+        grad0: jax.Array
+        iter: jax.Array
+        s: jax.Array
+        y: jax.Array
+        rho: jax.Array
+
+    def while_cond(st: State) -> jax.Array:
+        grad_cond = jnp.dot(st.grad0, st.grad0) >= opt_params.tol**2
+        return (st.iter < m) & grad_cond
+
+    def while_body(st: State) -> State:
+        p1 = -lbfgs.hess_vec_product(
+            st.grad0, st.s, st.y, st.rho, st.iter, opt_params.unroll
+        )
+        init_norm = opt_params.init_norm
+        p1 = jax.lax.cond(
+            st.iter == 0,
+            lambda: -st.grad0 / jnp.linalg.norm(st.grad0) * init_norm,
+            lambda: p1,
+        )
+
+        def phi(alpha: float | jax.Array) -> tuple[jax.Array, jax.Array]:
+            return opt_params.fun(fun_params, st.x0 + alpha * p1)
+
+        alpha_lo = jnp.array(0.0)
+        phi_zero, grad_f_zero = phi(alpha_lo)  # <- the removed evaluation
+        phip_zero = jnp.dot(grad_f_zero, p1)
+        alpha_hi = jnp.array(1.0)
+        phi_hi, grad_f_hi = phi(alpha_hi)
+        phip_hi = jnp.dot(grad_f_hi, p1)
+
+        alpha1, fun1, grad1 = lbfgs.zoom(
+            params=lbfgs.ParamsZoom(
+                c1=opt_params.c1,
+                c2=opt_params.c2,
+                max_iter=opt_params.max_ls,
+                fun=opt_params.fun,
+                fun_params=fun_params,
+                x0=st.x0,
+                p=p1,
+            ),
+            phi_zero=phi_zero,
+            phip_zero=phip_zero,
+            grad_f_hi=grad_f_hi,
+            alpha_lo=alpha_lo,
+            phi_lo=phi_zero,
+            phip_lo=phip_zero,
+            alpha_hi=alpha_hi,
+            phi_hi=phi_hi,
+            phip_hi=phip_hi,
+            unroll=opt_params.unroll,
+        )
+
+        x1 = st.x0 + alpha1 * p1
+        st.s = st.s.at[st.iter].set(x1 - st.x0)
+        st.y = st.y.at[st.iter].set(grad1 - st.grad0)
+        rho_iter = 1.0 / jnp.dot(st.s[st.iter], st.y[st.iter])
+        st.rho = st.rho.at[st.iter].set(rho_iter)
+        st.x0, st.fun0, st.grad0, st.iter = jax.lax.cond(
+            jnp.isnan(rho_iter) | jnp.any(jnp.isnan(x1)),
+            lambda: (st.x0, st.fun0, st.grad0, m),
+            lambda: (x1, fun1, grad1, st.iter + 1),
+        )
+        return st
+
+    state0 = State(x0, fun0, grad0, jnp.array(0), s, y, rho)
+    if not opt_params.unroll:
+        res = jax.lax.while_loop(while_cond, while_body, state0)
+    else:
+        res = state0
+        for _ in range(m):
+            res = while_body(res)
+    return res.x0, res.fun0, res.grad0
+
+
+def test_fun_eval_count():
+    """One call costs `1 + (1 + max_ls) * max_iter` evaluations."""
+    fun_val_grad = jax.value_and_grad(rosenbrock)
+
+    for max_iter in (1, 3):
+        for max_ls in (1, 2):
+            calls = 0
+
+            def fun(_: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
+                nonlocal calls
+                calls += 1
+                return fun_val_grad(x)
+
+            # `disable_jit` makes the `lax` loops run as python loops, so
+            # the python counter sees every evaluation.
+            with jax.disable_jit():
+                lbfgs.lbfgs(
+                    opt_params=lbfgs.OptParamsLBFGS(
+                        fun=fun,
+                        max_iter=max_iter,
+                        max_ls=max_ls,
+                        tol=1e-12,
+                        c1=1e-4,
+                        c2=0.9,
+                        unroll=False,
+                    ),
+                    x0=x0_rosenbrock,
+                    fun_params=jnp.array([]),
+                )
+
+            expect = 1 + (1 + max_ls) * max_iter
+            msg = f"max_iter={max_iter}, max_ls={max_ls}"
+            assert calls == expect, msg
+
+
+def test_lbfgs_unchanged_by_phi_zero_reuse():
+    """Reusing `phi(0)` leaves the returned iterate bitwise unchanged."""
+    fun_val_grad = jax.value_and_grad(rosenbrock)
+
+    def fun(_: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return fun_val_grad(x)
+
+    settings = [
+        (2, 1, False),
+        (3, 2, False),
+        (4, 1, False),
+        (2, 1, True),
+        (3, 2, True),
+    ]
+    for max_iter, max_ls, unroll in settings:
+        opt_params = lbfgs.OptParamsLBFGS(
+            fun=fun,
+            max_iter=max_iter,
+            max_ls=max_ls,
+            tol=1e-12,
+            c1=1e-4,
+            c2=0.9,
+            unroll=unroll,
+        )
+        res = lbfgs.lbfgs(
+            opt_params=opt_params,
+            x0=x0_rosenbrock,
+            fun_params=jnp.array([]),
+        )
+        ref = lbfgs_reeval(
+            opt_params=opt_params,
+            x0=x0_rosenbrock,
+            fun_params=jnp.array([]),
+        )
+        msg = f"max_iter={max_iter}, max_ls={max_ls}, unroll={unroll}"
+        for got, want, name in zip(res, ref, ["x", "fun", "grad"]):
+            assert np.array_equal(got, want), f"{name}: {msg}"

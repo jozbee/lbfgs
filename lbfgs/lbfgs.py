@@ -425,6 +425,17 @@ def lbfgs(
 
     Notes
     -----
+    One call evaluates `opt_params.fun` (value and gradient together)
+
+        1 + (1 + max_ls) * max_iter
+
+    times: once for the initial point, then per L-BFGS iteration once at
+    the unit step `alpha = 1` and `max_ls` times inside `zoom`.
+    (Before the line search reused `fun0`/`grad0` for `phi(0)` the count
+    was `1 + (2 + max_ls) * max_iter`.)
+    The count is an upper bound whenever the gradient tolerance stops the
+    loop early.
+
     Usually `unroll` should be set to False.
     Allowing `unroll == True` allows reverse-mode differentiation, which is
     desired for approximate minimization calls.
@@ -475,8 +486,11 @@ def lbfgs(
         def phi(alpha: float | jax.Array) -> tuple[jax.Array, jax.Array]:
             return opt_params.fun(fun_params, st.x0 + alpha * p1)
 
+        # phi(0) is already known: `x0 + 0.0 * p1` is bitwise `x0` and
+        # `fun` is deterministic, so `phi(alpha_lo) == (st.fun0, st.grad0)`.
+        # Reusing them saves one value-and-gradient call per iteration.
         alpha_lo = jnp.array(0.0)
-        phi_zero, grad_f_zero = phi(alpha_lo)
+        phi_zero, grad_f_zero = st.fun0, st.grad0
         phip_zero = jnp.dot(grad_f_zero, p1)
         alpha_hi = jnp.array(1.0)
         phi_hi, grad_f_hi = phi(alpha_hi)
