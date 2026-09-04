@@ -299,9 +299,12 @@ def lbfgs(
             res = opt_params.fun(fun_params, x0 + alpha * p1)
             return res[0], np.dot(res[1], p1), res[1]
 
-        # phi(0) is already known: `x0 + 0.0 * p1` is bitwise `x0` and
+        # phi(0) *is* (fun0, grad0): `x0 + 0.0 * p1` is bitwise `x0` and
         # `fun` is deterministic, so re-evaluating it would cost one call
-        # per iteration for a bitwise identical result.
+        # per iteration for the same result.  Here that result is bitwise
+        # the same, because the arithmetic around it is unchanged; the
+        # jax version compiles the loop as a whole, where dropping the
+        # evaluation can still move the accepted step by a few ulp.
         phi_zero = fun0
         phip_zero = np.dot(grad0, p1)
         alpha_hi = 1.0

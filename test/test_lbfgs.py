@@ -232,8 +232,9 @@ def lbfgs_reeval(
     The only difference to `lbfgs.lbfgs` is the marked line: the line
     search re-evaluates the objective at `alpha_lo == 0.0` instead of
     reusing `st.fun0` / `st.grad0`.  Because `x0 + 0.0 * p1` is bitwise
-    `x0` and the objective is deterministic, both must return bitwise
-    identical results.
+    `x0` and the objective is deterministic, the two agree
+    mathematically.  They agree bitwise only as long as the extra
+    evaluation does not change how the loop is compiled.
     """
     m = opt_params.max_iter
     fun0, grad0 = opt_params.fun(fun_params, x0)
@@ -357,7 +358,12 @@ def test_fun_eval_count():
 
 
 def test_lbfgs_unchanged_by_phi_zero_reuse():
-    """Reusing `phi(0)` leaves the returned iterate bitwise unchanged."""
+    """Reusing `phi(0)` leaves the returned iterate unchanged.
+
+    On the 2-d Rosenbrock the agreement is still bitwise, but that is a
+    property of this small program rather than a guarantee; cf. the
+    docstring of `lbfgs_reeval`.
+    """
     fun_val_grad = jax.value_and_grad(rosenbrock)
 
     def fun(_: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:

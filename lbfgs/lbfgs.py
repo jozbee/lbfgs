@@ -432,7 +432,11 @@ def lbfgs(
     times: once for the initial point, then per L-BFGS iteration once at
     the unit step `alpha = 1` and `max_ls` times inside `zoom`.
     (Before the line search reused `fun0`/`grad0` for `phi(0)` the count
-    was `1 + (2 + max_ls) * max_iter`.)
+    was `1 + (2 + max_ls) * max_iter`.  The reuse is mathematically
+    exact -- `phi(0)` *is* `(fun0, grad0)` -- but it changes the compiled
+    program, so the accepted step can move by a few ulp of the
+    directional derivative; on the MPC problem this was written for that
+    is up to `1e-8` relative on the iterate.)
     The count is an upper bound whenever the gradient tolerance stops the
     loop early.
 
@@ -486,9 +490,12 @@ def lbfgs(
         def phi(alpha: float | jax.Array) -> tuple[jax.Array, jax.Array]:
             return opt_params.fun(fun_params, st.x0 + alpha * p1)
 
-        # phi(0) is already known: `x0 + 0.0 * p1` is bitwise `x0` and
-        # `fun` is deterministic, so `phi(alpha_lo) == (st.fun0, st.grad0)`.
-        # Reusing them saves one value-and-gradient call per iteration.
+        # phi(0) *is* (st.fun0, st.grad0): `x0 + 0.0 * p1` is bitwise `x0`
+        # and `fun` is deterministic, so reusing them is mathematically
+        # exact and saves one value-and-gradient call per iteration.
+        # It is not free of rounding, though: dropping the evaluation
+        # changes the compiled program, so `phip_zero` -- and with it the
+        # accepted step -- can move by a few ulp.
         alpha_lo = jnp.array(0.0)
         phi_zero, grad_f_zero = st.fun0, st.grad0
         phip_zero = jnp.dot(grad_f_zero, p1)
